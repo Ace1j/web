@@ -1,0 +1,603 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SaldiFin - Finanzas Personales</title>
+    <!-- Carga de Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Carga de la biblioteca Lucide para iconos -->
+    <script type="module">
+        import { createIcons, Plus, Minus, BarChart2, DollarSign, Clock } from 'https://unpkg.com/lucide@latest';
+        window.lucide = { createIcons, Plus, Minus, BarChart2, DollarSign, Clock };
+    </script>
+    <style>
+        /* Estilos personalizados para asegurar que el modal y el body funcionen bien en móvil */
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #0d1117; /* Fondo oscuro */
+        }
+        /* Ajuste para el contenido que no se esconda bajo el nav */
+        main {
+            padding-bottom: 6rem; /* Espacio para la barra de navegación inferior */
+        }
+    </style>
+</head>
+<body>
+    
+    <!-- Contenedor Principal de la App -->
+    <div id="app-container" class="min-h-screen bg-gray-900 font-sans antialiased text-white flex flex-col">
+        <!-- El contenido se renderizará aquí -->
+    </div>
+
+    <!-- Script de Inicialización y Lógica (Módulo) -->
+    <script type="module">
+        // --- 1. CONFIGURACIÓN LOCAL (SIN FIREBASE) ---
+        
+        // Claves para el almacenamiento local del navegador
+        const STORAGE_KEYS = {
+            CONFIG: 'saldifin_config',
+            TRANSACTIONS: 'saldifin_transactions',
+        };
+
+        // --- 2. ESTADO GLOBAL DE LA APP ---
+        // Eliminamos currentUserId, auth y db.
+        let isAppReady = false; // Indica si los datos de localStorage han sido cargados
+        let dailyRate = 0; // Tasa de cambio (Bs/USD)
+        let monthlySalaryBs = 0; // Sueldo mensual
+        let transactions = [];
+        let isModalOpen = false;
+        let isRateModalOpen = false;
+        let isSalaryModalOpen = false;
+        let newTransaction = { type: 'income', description: '', amountBs: '' };
+        let newRate = '';
+        let newSalary = '';
+        let error = null; // Variable para almacenar errores de UI
+
+        // --- 3. FUNCIONES DE UTILIDAD ---
+        
+        const formatBs = (amount) => {
+            if (typeof amount !== 'number' || isNaN(amount)) return 'Bs. 0.00';
+            return `Bs. ${new Intl.NumberFormat('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(amount)}`;
+        };
+
+        const formatUsd = (amount) => {
+            if (typeof amount !== 'number' || isNaN(amount)) return '$ 0.00';
+            return `$ ${new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(amount)}`;
+        };
+
+        const calculateBalances = () => {
+            const today = new Date();
+            // Creamos una fecha que representa el primer día del mes actual (hora 00:00:00)
+            const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1).getTime();
+
+            // Usamos un filtro más robusto para comparar fechas (getTime() devuelve milisegundos)
+            const currentMonthTxs = transactions.filter(tx => new Date(tx.date).getTime() >= startOfMonth);
+
+            const totalIncome = currentMonthTxs
+                .filter(tx => tx.type === 'income')
+                .reduce((sum, tx) => sum + (tx.amountBs || 0), monthlySalaryBs); // Incluye el sueldo
+
+            const totalExpense = currentMonthTxs
+                .filter(tx => tx.type === 'expense')
+                .reduce((sum, tx) => sum + (tx.amountBs || 0), 0);
+
+            const netBalanceBs = totalIncome - totalExpense;
+            // Evitar división por cero
+            const netBalanceUsd = dailyRate && dailyRate > 0 ? netBalanceBs / dailyRate : 0;
+
+            return { totalIncome, totalExpense, netBalanceBs, netBalanceUsd };
+        };
+        
+        // --- 4. FUNCIONES DE PERSISTENCIA (LOCALSTORAGE) ---
+
+        const loadConfig = () => {
+            try {
+                const configString = localStorage.getItem(STORAGE_KEYS.CONFIG);
+                if (configString) {
+                    const config = JSON.parse(configString);
+                    dailyRate = config.dailyRate || 36.50; // Usar valor por defecto si falta
+                    monthlySalaryBs = config.monthlySalaryBs || 0;
+                } else {
+                    // Valores por defecto si no existe nada
+                    dailyRate = 36.50;
+                    monthlySalaryBs = 0;
+                }
+            } catch (e) {
+                console.error("Error al cargar la configuración de localStorage:", e);
+                dailyRate = 36.50;
+                monthlySalaryBs = 0;
+            }
+        };
+
+        const saveConfig = () => {
+            try {
+                const config = {
+                    dailyRate: dailyRate,
+                    monthlySalaryBs: monthlySalaryBs,
+                    lastUpdated: new Date().toISOString(),
+                };
+                localStorage.setItem(STORAGE_KEYS.CONFIG, JSON.stringify(config));
+            } catch (e) {
+                console.error("Error al guardar la configuración en localStorage:", e);
+                error = "Error al guardar la configuración local. Intenta vaciar la caché del navegador.";
+            }
+        };
+
+        const loadTransactions = () => {
+            try {
+                const txString = localStorage.getItem(STORAGE_KEYS.TRANSACTIONS);
+                if (txString) {
+                    transactions = JSON.parse(txString);
+                    // Asegurarse de que la propiedad 'date' sea un objeto Date
+                    transactions.forEach(tx => {
+                        // Si la fecha es un string ISO, la convertimos a Date
+                        if (typeof tx.date === 'string') {
+                            tx.date = new Date(tx.date); 
+                        }
+                    });
+                }
+                // Ordenar en memoria (descendente por fecha)
+                transactions.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+            } catch (e) {
+                console.error("Error al cargar transacciones de localStorage:", e);
+                transactions = [];
+            }
+        };
+
+        const saveTransactions = () => {
+             // Guardamos las transacciones como strings ISO para que localStorage las maneje bien
+             const serializableTransactions = transactions.map(tx => ({
+                ...tx,
+                date: new Date(tx.date).toISOString(), // Convertir Date a string
+            }));
+            try {
+                localStorage.setItem(STORAGE_KEYS.TRANSACTIONS, JSON.stringify(serializableTransactions));
+            } catch (e) {
+                console.error("Error al guardar transacciones en localStorage:", e);
+                error = "Error al guardar transacciones locales. El espacio puede estar lleno.";
+            }
+        };
+
+
+        // --- 5. RENDERIZADO DEL MODAL (Lógica sin cambios) ---
+
+        const renderModal = () => {
+            if (!isModalOpen && !isRateModalOpen && !isSalaryModalOpen) return '';
+
+            let title, content, onSubmitFunction, currentModalState, submitText = 'Guardar';
+            
+            if (isModalOpen) {
+                title = "Nueva Transacción";
+                onSubmitFunction = handleSaveTransaction;
+                currentModalState = newTransaction;
+                submitText = 'Guardar';
+                content = `
+                    <div class="space-y-4">
+                        <div class="flex space-x-3">
+                            <button id="btn-income" data-type="income" class="flex-1 p-3 rounded-lg text-sm font-semibold transition ${currentModalState.type === 'income' ? 'bg-green-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}">
+                                Ingreso
+                            </button>
+                            <button id="btn-expense" data-type="expense" class="flex-1 p-3 rounded-lg text-sm font-semibold transition ${currentModalState.type === 'expense' ? 'bg-red-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}">
+                                Egreso
+                            </button>
+                        </div>
+                        <input id="input-description" type="text" placeholder="Descripción (ej: Compra de víveres)" value="${currentModalState.description}" 
+                            class="w-full p-3 bg-gray-700 rounded-lg text-white placeholder-gray-400 focus:ring-green-500 focus:border-green-500 border-none outline-none"
+                        />
+                        <input id="input-amount" type="number" placeholder="Monto en Bolívares (Bs)" value="${currentModalState.amountBs}" 
+                            class="w-full p-3 bg-gray-700 rounded-lg text-white placeholder-gray-400 focus:ring-green-500 focus:border-green-500 border-none outline-none"
+                        />
+                    </div>
+                `;
+            } else if (isRateModalOpen) {
+                title = "Actualizar Tasa de Cambio";
+                onSubmitFunction = handleSaveRate;
+                submitText = 'Guardar Tasa';
+                content = `
+                    <p class="text-sm text-gray-400 mb-3">Introduce el valor actual de Bs. por 1 USD. (Usa punto '.' o coma ',' como decimal)</p>
+                    <input id="input-rate" type="text" placeholder="Tasa (ej: 37.50)" value="${newRate}"
+                        class="w-full p-3 bg-gray-700 rounded-lg text-white placeholder-gray-400 focus:ring-green-500 focus:border-green-500 border-none outline-none"
+                    />
+                `;
+            } else if (isSalaryModalOpen) {
+                title = "Actualizar Sueldo Mensual";
+                onSubmitFunction = handleSaveSalary;
+                submitText = 'Guardar Sueldo';
+                content = `
+                    <p class="text-sm text-gray-400 mb-3">Introduce tu sueldo mensual en Bolívares (Bs). (Usa punto '.' o coma ',' como decimal)</p>
+                    <input id="input-salary" type="text" placeholder="Sueldo en Bs. (ej: 1000.00)" value="${newSalary}"
+                        class="w-full p-3 bg-gray-700 rounded-lg text-white placeholder-gray-400 focus:ring-green-500 focus:border-green-500 border-none outline-none"
+                    />
+                `;
+            }
+
+            const modalHtml = `
+                <div id="simple-modal-overlay" class="fixed inset-0 bg-black bg-opacity-70 z-50 flex items-center justify-center p-4">
+                    <div class="bg-gray-800 text-white p-6 rounded-xl shadow-2xl w-full max-w-sm border border-green-500/30">
+                        <h3 class="text-xl font-bold mb-4 text-green-400">${title}</h3>
+                        ${content}
+                        <div class="flex justify-end space-x-3 mt-6">
+                            <button id="modal-cancel-btn" class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm transition">
+                                Cancelar
+                            </button>
+                            <button id="modal-submit-btn" class="px-4 py-2 bg-green-600 hover:bg-green-700 rounded-lg text-sm font-semibold transition">
+                                ${submitText}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            `;
+            document.body.insertAdjacentHTML('beforeend', modalHtml);
+
+            // Añadir Listeners al Modal recién creado
+            const modalElement = document.getElementById('simple-modal-overlay');
+            if (!modalElement) return;
+
+            document.getElementById('modal-cancel-btn').addEventListener('click', closeModal);
+            document.getElementById('modal-submit-btn').addEventListener('click', onSubmitFunction);
+
+            if (isModalOpen) {
+                const descInput = document.getElementById('input-description');
+                const amountInput = document.getElementById('input-amount');
+                const btnIncome = document.getElementById('btn-income');
+                const btnExpense = document.getElementById('btn-expense');
+
+                descInput.addEventListener('input', (e) => newTransaction.description = e.target.value);
+                amountInput.addEventListener('input', (e) => newTransaction.amountBs = e.target.value);
+                
+                btnIncome.addEventListener('click', () => {
+                    newTransaction.type = 'income';
+                    renderApp(); 
+                });
+                btnExpense.addEventListener('click', () => {
+                    newTransaction.type = 'expense';
+                    renderApp(); 
+                });
+            } else if (isRateModalOpen) {
+                const rateInput = document.getElementById('input-rate');
+                rateInput.addEventListener('input', (e) => newRate = e.target.value);
+            } else if (isSalaryModalOpen) {
+                const salaryInput = document.getElementById('input-salary');
+                salaryInput.addEventListener('input', (e) => newSalary = e.target.value);
+            }
+        };
+
+        const closeModal = () => {
+            isModalOpen = false;
+            isRateModalOpen = false;
+            isSalaryModalOpen = false;
+            // Reiniciar el estado del formulario después de cerrar
+            newTransaction = { type: 'income', description: '', amountBs: '' };
+            newRate = '';
+            newSalary = '';
+            const modalElement = document.getElementById('simple-modal-overlay');
+            if (modalElement) modalElement.remove();
+        };
+
+        // --- 6. MANEJADORES DE EVENTOS DEL DASHBOARD (AHORA GUARDAN LOCALMENTE) ---
+
+        const handleOpenTransactionModal = (type = 'income') => {
+            newTransaction.type = type;
+            isModalOpen = true;
+            renderApp();
+        };
+        
+        const handleOpenRateModal = () => {
+            // Inicializar newRate con el valor actual (convertido a string para input)
+            newRate = dailyRate && !isNaN(dailyRate) ? dailyRate.toString() : '36.50';
+            isRateModalOpen = true;
+            renderApp();
+        };
+        
+        const handleOpenSalaryModal = () => {
+            // Inicializar newSalary con el valor actual (convertido a string para input)
+            newSalary = monthlySalaryBs && !isNaN(monthlySalaryBs) ? monthlySalaryBs.toString() : '0.00';
+            isSalaryModalOpen = true;
+            renderApp();
+        };
+
+        const handleSaveTransaction = () => {
+            error = null; // Limpiar errores anteriores
+            
+            const rawAmount = newTransaction.amountBs.trim().replace(',', '.'); // Permite coma como decimal
+            const amount = parseFloat(rawAmount);
+
+            // Validación robusta
+            if (!newTransaction.description.trim() || isNaN(amount) || amount <= 0) {
+                error = "Error: Completa todos los campos con un monto válido (Bs > 0).";
+                closeModal(); 
+                renderApp();
+                return;
+            }
+            
+            closeModal(); 
+            
+            // Añadir la nueva transacción al estado local y guardar
+            const newTx = {
+                id: Date.now().toString(), // ID simple basado en timestamp
+                type: newTransaction.type,
+                description: newTransaction.description.trim(),
+                amountBs: amount,
+                date: new Date(),
+            };
+            
+            transactions.push(newTx);
+            saveTransactions();
+            
+            // Recargar datos y renderizar
+            loadTransactions(); 
+            renderApp();
+        };
+
+        const handleSaveRate = () => {
+            error = null; // Limpiar errores anteriores
+            
+            // CORRECCIÓN CRÍTICA: Reemplazar comas por puntos para que parseFloat funcione
+            const rawValue = newRate.trim().replace(',', '.'); 
+
+            // 1. Verificar si está vacío
+            if (rawValue === '') {
+                error = "Error: La tasa de cambio no puede estar vacía.";
+                closeModal(); renderApp(); return;
+            }
+
+            const rate = parseFloat(rawValue);
+
+            // 2. Verificar si es un número válido y positivo
+            if (isNaN(rate) || rate <= 0) {
+                error = "Error: Introduce un valor numérico válido y positivo (Bs/USD > 0).";
+                closeModal(); renderApp(); return;
+            }
+            
+            closeModal();
+            
+            // Actualizar estado y guardar
+            dailyRate = rate;
+            saveConfig();
+            renderApp();
+        };
+        
+        const handleSaveSalary = () => {
+            error = null; // Limpiar errores anteriores
+            
+            // CORRECCIÓN CRÍTICA: Reemplazar comas por puntos para que parseFloat funcione
+            const rawValue = newSalary.trim().replace(',', '.'); 
+
+            // 1. Verificar si está vacío
+            if (rawValue === '') {
+                error = "Error: El sueldo no puede estar vacío. Usa 0 si no tienes un sueldo fijo.";
+                closeModal(); renderApp(); return;
+            }
+
+            const salary = parseFloat(rawValue);
+
+            // 2. Verificar si es un número válido y no negativo
+            if (isNaN(salary) || salary < 0) {
+                error = "Error: Introduce un valor numérico válido (Bs >= 0).";
+                closeModal(); renderApp(); return;
+            }
+            
+            closeModal();
+            
+            // Actualizar estado y guardar
+            monthlySalaryBs = salary;
+            saveConfig();
+            renderApp();
+        };
+        
+
+        // --- 7. LÓGICA DE RENDERIZADO DEL DASHBOARD (HTML Puro) ---
+        
+        const renderDashboard = () => {
+            const { totalIncome, totalExpense, netBalanceBs, netBalanceUsd } = calculateBalances();
+            
+            let recentTransactionsHTML = transactions.slice(0, 5).map(tx => `
+                <div class="flex justify-between items-center bg-gray-800 p-3 rounded-xl">
+                    <div class="flex items-center space-x-3">
+                        <div class="p-2 rounded-full ${tx.type === 'income' ? 'bg-green-600/30 text-green-400' : 'bg-red-600/30 text-red-400'}">
+                            <!-- Iconos de Lucide -->
+                            ${tx.type === 'income' ? '<svg width="16" height="16"><use href="#lucide-plus" /></svg>' : '<svg width="16" height="16"><use href="#lucide-minus" /></svg>'}
+                        </div>
+                        <div>
+                            <p class="text-sm font-semibold text-white">${tx.description}</p>
+                            <p class="text-xs text-gray-500">${new Date(tx.date).toLocaleDateString('es-VE')}</p>
+                        </div>
+                    </div>
+                    <p class="text-sm font-bold ${tx.type === 'income' ? 'text-green-400' : 'text-red-400'}">
+                        ${formatBs(tx.amountBs)}
+                    </p>
+                </div>
+            `).join('');
+
+            if (transactions.length === 0) {
+                recentTransactionsHTML = '<p class="text-gray-500 text-center py-4">Aún no hay transacciones este mes.</p>';
+            }
+
+            return `
+                <div class="p-4 space-y-6">
+                    
+                    ${error ? `<div class="bg-red-900 text-white p-3 text-center font-semibold rounded-lg mb-4">${error}</div>` : ''}
+
+                    <!-- Saldo Principal y Conversión -->
+                    <div class="bg-gray-800 p-6 rounded-2xl shadow-xl border-l-4 border-green-500">
+                        <div class="flex items-center justify-between mb-3">
+                            <h2 class="text-sm font-medium text-gray-400">Saldo Total del Mes</h2>
+                            <span class="text-lg">🇻🇪</span>
+                        </div>
+                        <p class="text-4xl font-extrabold text-white">
+                            ${formatBs(netBalanceBs)}
+                        </p>
+                        <div class="text-xl font-semibold mt-1 ${netBalanceBs >= 0 ? 'text-green-400' : 'text-red-400'}">
+                            ${formatUsd(netBalanceUsd)}
+                        </div>
+                    </div>
+
+                    <!-- Ingresos vs Egresos -->
+                    <div class="grid grid-cols-2 gap-4">
+                        <div class="bg-gray-800 p-4 rounded-xl shadow-lg border-l-4 border-green-600">
+                            <p class="text-xs font-semibold uppercase text-green-400 mb-1">Ingresos (Bs)</p>
+                            <p class="text-xl font-bold text-white">${formatBs(totalIncome)}</p>
+                        </div>
+                        <div class="bg-gray-800 p-4 rounded-xl shadow-lg border-l-4 border-red-600">
+                            <p class="text-xs font-semibold uppercase text-red-400 mb-1">Egresos (Bs)</p>
+                            <p class="text-xl font-bold text-white">${formatBs(totalExpense)}</p>
+                        </div>
+                    </div>
+
+                    <!-- Tasa del Día y Sueldo -->
+                    <div class="grid grid-cols-2 gap-4">
+                        <button id="btn-open-rate-modal" class="bg-gray-800 p-4 rounded-xl shadow-lg border border-gray-700 hover:border-green-500 transition active:scale-[0.98]">
+                            <p class="text-xs font-semibold uppercase text-yellow-400 mb-1">Tasa del Día (Bs/USD)</p>
+                            <p class="text-xl font-bold text-white text-center">${dailyRate && !isNaN(dailyRate) ? dailyRate.toFixed(2) : 'N/A'}</p>
+                            <p class="text-xs text-gray-500 mt-1">Toca para actualizar</p>
+                        </button>
+                        <button id="btn-open-salary-modal" class="bg-gray-800 p-4 rounded-xl shadow-lg border border-gray-700 hover:border-green-500 transition active:scale-[0.98]">
+                            <p class="text-xs font-semibold uppercase text-blue-400 mb-1">Sueldo Mensual (Bs)</p>
+                            <p class="text-xl font-bold text-white text-center">${formatBs(monthlySalaryBs)}</p>
+                            <p class="text-xs text-gray-500 mt-1">Toca para editar</p>
+                        </button>
+                    </div>
+                    
+                    <!-- Historial de Transacciones Recientes -->
+                    <div class="space-y-3">
+                        <h3 class="text-lg font-bold text-white border-b border-gray-700 pb-2">Movimientos Recientes</h3>
+                        ${recentTransactionsHTML}
+                    </div>
+
+                </div>
+            `;
+        };
+
+        // --- 8. LÓGICA DE RENDERIZADO GLOBAL ---
+
+        const renderLoadingScreen = () => {
+            return `
+                <div class="relative flex flex-col items-center justify-center min-h-screen bg-gray-900 text-green-400 p-4">
+                    <div class="text-5xl font-black text-green-500 drop-shadow-lg mb-4 animate-pulse">
+                        SaldiFin :)
+                    </div>
+                    <p class="text-xl text-gray-300 mb-8">
+                        Cargando datos locales...
+                    </p>
+                    <div class="w-16 h-16 border-4 border-green-500 border-t-transparent rounded-full animate-spin mb-4"></div>
+                    <p class="absolute bottom-4 right-4 text-sm text-gray-500">
+                        Creado por José Acevedo
+                    </p>
+                </div>
+            `;
+        };
+        
+        const renderApp = () => {
+            const container = document.getElementById('app-container');
+            if (!container) return;
+
+            // Limpiar y renderizar el Modal
+            const existingModal = document.getElementById('simple-modal-overlay');
+            if (existingModal) existingModal.remove();
+
+            if (!isAppReady) {
+                container.innerHTML = renderLoadingScreen();
+                return;
+            }
+            
+            // Mensaje de estado local
+            const statusDisplay = 'Datos guardados en este navegador (localStorage)';
+
+            // Estructura principal
+            container.innerHTML = `
+                <!-- Encabezado Fijo -->
+                <header class="sticky top-0 bg-gray-900 border-b border-gray-800 p-4 shadow-lg z-10">
+                    <div class="flex justify-between items-center flex-wrap">
+                        <div class="text-2xl font-black text-green-500 drop-shadow-lg">
+                            SaldiFin :)
+                        </div>
+                        <!-- Estado de almacenamiento local -->
+                        <div class="text-xs text-gray-500 break-all mt-1 sm:mt-0">
+                            ${statusDisplay}
+                        </div>
+                    </div>
+                    <p class="text-lg mt-2 text-gray-300">Hola, ¡bienvenido de vuelta!</p>
+                </header>
+                
+                <!-- Contenido Principal -->
+                <main class="flex-grow overflow-y-auto">
+                    ${renderDashboard()}
+                </main>
+
+                <!-- Barra de Navegación Fija Inferior -->
+                <nav class="fixed bottom-0 left-0 right-0 bg-gray-800 border-t-2 border-green-500/50 shadow-t-lg z-20">
+                    <div class="flex justify-around items-center h-16 max-w-lg mx-auto">
+                        <!-- Inicio -->
+                        <button class="flex flex-col items-center text-green-500">
+                            <svg data-lucide="bar-chart-2" class="w-6 h-6"></svg>
+                            <span class="text-xs mt-1">Inicio</span>
+                        </button>
+                        <!-- Añadir Transacción (Botón Central Flotante) -->
+                        <div class="-mt-10">
+                            <button 
+                                id="btn-add-transaction"
+                                class="w-16 h-16 bg-green-600 hover:bg-green-700 rounded-full flex items-center justify-center shadow-xl transform transition duration-150 ease-in-out active:scale-95 border-4 border-gray-900/50"
+                            >
+                                <svg data-lucide="plus" class="w-8 h-8 text-white"></svg>
+                            </button>
+                        </div>
+                        <!-- Conversor / Historial (Falso por ahora) -->
+                        <button class="flex flex-col items-center text-gray-400 hover:text-green-400 transition">
+                            <svg data-lucide="clock" class="w-6 h-6"></svg>
+                            <span class="text-xs mt-1">Historial</span>
+                        </button>
+                    </div>
+                </nav>
+            `;
+
+            // Re-enlazar Eventos (Importante para HTML puro)
+            const btnAddTransaction = document.getElementById('btn-add-transaction');
+            if (btnAddTransaction) btnAddTransaction.addEventListener('click', () => handleOpenTransactionModal('income'));
+            
+            const btnOpenRateModal = document.getElementById('btn-open-rate-modal');
+            if (btnOpenRateModal) btnOpenRateModal.addEventListener('click', handleOpenRateModal);
+            
+            const btnOpenSalaryModal = document.getElementById('btn-open-salary-modal');
+            if (btnOpenSalaryModal) btnOpenSalaryModal.addEventListener('click', handleOpenSalaryModal);
+
+            // Renderizar el modal si está activo
+            renderModal();
+            
+            // Re-renderizar iconos de Lucide (si están disponibles)
+            if (window.lucide && window.lucide.createIcons) {
+                window.lucide.createIcons({
+                    icons: { 
+                        Plus: window.lucide.Plus, 
+                        Minus: window.lucide.Minus, 
+                        BarChart2: window.lucide.BarChart2, 
+                        Clock: window.lucide.Clock
+                    },
+                    attrs: {
+                        'stroke-width': 2,
+                    },
+                    nameAttr: 'data-lucide',
+                });
+            }
+        };
+
+        // --- 9. LÓGICA DE INICIALIZACIÓN ---
+
+        const initializeApp = () => {
+            // 1. Cargar la configuración (tasa, sueldo)
+            loadConfig();
+            
+            // 2. Cargar las transacciones
+            loadTransactions();
+            
+            // 3. Marcar la aplicación como lista y renderizar
+            isAppReady = true;
+            renderApp();
+        };
+        
+        // Iniciar la aplicación en cuanto se cargue el DOM
+        window.addEventListener('load', initializeApp);
+
+    </script>
+</body>
+</html>
