@@ -1,0 +1,852 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SaldiFIN - Finanzas Personales</title>
+    <!-- Carga de Tailwind CSS para un diseño limpio y moderno -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Carga de la biblioteca Lucide para iconos -->
+    <script type="module">
+        import { createIcons, Plus, BarChart2, Trash2, Settings, List, TrendingUp, TrendingDown, RefreshCw, X, Check } from 'https://unpkg.com/lucide@latest';
+        // Agregamos X y Check para las notificaciones
+        window.lucide = { createIcons, Plus, BarChart2, Trash2, Settings, List, TrendingUp, TrendingDown, RefreshCw, X, Check };
+    </script>
+    <style>
+        /* Estilos base */
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #0d1117; /* Fondo oscuro */
+        }
+        main {
+            padding-bottom: 6rem; /* Espacio para la barra de navegación inferior */
+        }
+    </style>
+</head>
+<body>
+    
+    <!-- Contenedor Principal de la App (Inicialmente vacío, se llena con el renderizado) -->
+    <div id="app-container" class="min-h-screen bg-gray-900 font-sans antialiased text-white flex flex-col">
+        <!-- El contenido será insertado aquí por JavaScript -->
+    </div>
+
+    <!-- Script de Inicialización y Lógica (Módulo) -->
+    <script type="module">
+        // --- 1. CONFIGURACIÓN LOCAL (LocalStorage Keys) ---
+        // Usamos localStorage para el guardado local como se solicitó para entornos de prueba.
+        const STORAGE_KEYS = {
+            CONFIG: 'saldifin_config',
+            TRANSACTIONS: 'saldifin_transactions',
+        };
+
+        // --- 2. ESTADO GLOBAL DE LA APP y VALORES POR DEFECTO (BASE) ---
+        const DEFAULT_CONFIG = {
+            currency: 'VEF', // Moneda base fija: Bolívar Venezolano
+            dailyDollarRate: 36.0, // Tasa del dólar por defecto (Bs. por 1 USD)
+            taxRate: 0, // Porcentaje de tasa
+            incomeCategories: ['Salario', 'Freelance', 'Inversión', 'Otros'],
+            expenseCategories: ['Alquiler', 'Comida', 'Transporte', 'Entretenimiento', 'Deudas', 'Servicios', 'Otros'],
+        };
+        
+        let config = { ...DEFAULT_CONFIG }; // Inicializa con los valores por defecto
+        let transactions = [];
+        let currentView = 'dashboard';
+        let isAppReady = false; // Estado para saber si la carga inicial fue exitosa
+
+        // --- 3. GESTIÓN DE LOCAL STORAGE ---
+        const saveConfig = () => {
+            localStorage.setItem(STORAGE_KEYS.CONFIG, JSON.stringify(config));
+        };
+
+        /**
+         * Carga la configuración desde localStorage de forma robusta.
+         * Se asegura de que todos los valores cruciales tengan un valor numérico por defecto
+         * si el localStorage está vacío o corrupto.
+         */
+        const loadConfig = () => {
+            const savedConfig = localStorage.getItem(STORAGE_KEYS.CONFIG);
+            let loadedConfig = savedConfig ? JSON.parse(savedConfig) : {};
+            
+            // CORRECCIÓN CLAVE: Fusionar configuración guardada con valores por defecto.
+            // Esto garantiza que config siempre tenga todas las propiedades necesarias.
+            config = {
+                ...DEFAULT_CONFIG, // Inicia con todos los valores por defecto
+                ...loadedConfig,   // Sobrescribe con cualquier valor guardado
+            };
+
+            // Post-chequeo para asegurar que los números críticos son válidos (evita NaN)
+            if (typeof config.dailyDollarRate !== 'number' || isNaN(config.dailyDollarRate)) {
+                config.dailyDollarRate = DEFAULT_CONFIG.dailyDollarRate;
+            }
+            if (typeof config.taxRate !== 'number' || isNaN(config.taxRate)) {
+                config.taxRate = DEFAULT_CONFIG.taxRate;
+            }
+            // Aseguramos que la moneda base sea VEF
+            config.currency = 'VEF'; 
+        };
+
+        const saveTransactions = () => {
+            localStorage.setItem(STORAGE_KEYS.TRANSACTIONS, JSON.stringify(transactions));
+        };
+
+        const loadTransactions = () => {
+            const savedTransactions = localStorage.getItem(STORAGE_KEYS.TRANSACTIONS);
+            if (savedTransactions) {
+                // Parseamos y nos aseguramos de que las fechas sean objetos Date para cálculos
+                transactions = JSON.parse(savedTransactions).map(t => ({
+                    ...t,
+                    date: new Date(t.date),
+                }));
+            }
+        };
+
+        // --- 4. UTILIDADES ---
+        const formatCurrency = (amount, customCurrency) => {
+            // Maneja NaN y valores nulos para mostrar 0.00 de forma segura.
+            if (isNaN(amount) || amount === null || typeof amount === 'undefined') {
+                 amount = 0;
+            }
+            
+            // Usa customCurrency si se proporciona, de lo contrario usa la moneda de la configuración.
+            const currencyToUse = customCurrency || config.currency;
+            
+            let symbol;
+            if (currencyToUse === 'VEF') {
+                symbol = 'Bs.'; // Bolívar Venezolano
+            } else if (currencyToUse === 'USD') {
+                symbol = '$'; // Dólar
+            } else if (currencyToUse === 'EUR') {
+                symbol = '€';
+            } else {
+                symbol = currencyToUse; // Otros códigos
+            }
+            
+            // Asegura que el número se formatea correctamente
+            return `${symbol} ${Math.abs(parseFloat(amount).toFixed(2))}`;
+        };
+
+        const calculateTax = (amount) => {
+            return amount * (config.taxRate / 100);
+        };
+        
+        // --- 5. LÓGICA DE TRANSACCIONES ---
+        const addTransaction = (type, amount, category, description) => {
+            // Aseguramos que amount sea numérico y positivo
+            const numericAmount = parseFloat(amount);
+            if (isNaN(numericAmount) || numericAmount <= 0) return false;
+
+            const transaction = {
+                id: Date.now(),
+                type: type, // 'income' o 'expense'
+                amount: numericAmount,
+                category: category,
+                description: description || '',
+                date: new Date(),
+            };
+
+            transactions.push(transaction);
+            saveTransactions();
+            renderApp();
+            return true;
+        };
+        
+        const deleteTransaction = (id) => {
+            transactions = transactions.filter(t => t.id !== id);
+            saveTransactions();
+            renderApp();
+        };
+
+        const resetApp = () => {
+            // 1. Limpiar LocalStorage
+            localStorage.removeItem(STORAGE_KEYS.CONFIG);
+            localStorage.removeItem(STORAGE_KEYS.TRANSACTIONS);
+            
+            // 2. Resetear Estado Global a valores por defecto
+            config = { ...DEFAULT_CONFIG }; // Usar la copia de los valores base
+            transactions = [];
+            currentView = 'dashboard';
+            
+            // 3. Re-renderizar
+            renderApp();
+        };
+
+        // --- 6. CÁLCULOS DEL DASHBOARD ---
+        const calculateSummary = () => {
+            // La inicialización con 0 en reduce previene NaN si la lista está vacía.
+            const totalIncome = transactions
+                .filter(t => t.type === 'income')
+                .reduce((sum, t) => sum + t.amount, 0);
+
+            const totalExpense = transactions
+                .filter(t => t.type === 'expense')
+                .reduce((sum, t) => sum + t.amount, 0);
+
+            const subtotal = totalIncome - totalExpense;
+            
+            // Calculamos impuestos solo sobre ingresos (ejemplo simple)
+            const taxAmount = calculateTax(totalIncome);
+
+            const netBalance = subtotal - taxAmount;
+            
+            // Cálculo de USD: La robustez de loadConfig previene config.dailyDollarRate siendo NaN/undefined.
+            let balanceInUSD = 0;
+            if (config.dailyDollarRate > 0) {
+                balanceInUSD = netBalance / config.dailyDollarRate;
+            } else {
+                 // Si la tasa es 0 o negativa (imposible con la validación de input, pero como prevención)
+                 balanceInUSD = 0; 
+            }
+
+            return { totalIncome, totalExpense, taxAmount, netBalance, subtotal, balanceInUSD };
+        };
+
+        // --- 7. VISTAS DEL DASHBOARD ---
+
+        const renderDashboard = () => {
+            const { totalIncome, totalExpense, taxAmount, netBalance, subtotal, balanceInUSD } = calculateSummary();
+            const balanceColor = netBalance >= 0 ? 'text-green-400' : 'text-red-400';
+            const incomeColor = totalIncome > 0 ? 'text-green-400' : 'text-gray-400';
+            const expenseColor = totalExpense > 0 ? 'text-red-400' : 'text-gray-400';
+            const usdColor = balanceInUSD >= 0 ? 'text-green-500' : 'text-red-500';
+
+            return `
+                <header class="sticky top-0 bg-gray-900 shadow-md p-4 flex justify-between items-center z-10">
+                    <h1 class="text-2xl font-bold text-green-400">SaldiFIN :)</h1>
+                    <div class="flex items-center space-x-3">
+                        <!-- Botón para editar la tasa, prominente en la esquina derecha -->
+                        <button id="btn-edit-rate" class="flex items-center text-sm font-bold text-yellow-400 p-2 rounded-xl bg-gray-700 hover:bg-gray-600 transition shadow-md border border-yellow-500/50">
+                            1 $ = ${formatCurrency(config.dailyDollarRate, 'VEF')}
+                            <i data-lucide="refresh-cw" class="w-4 h-4 ml-2 text-yellow-500"></i>
+                        </button>
+                        <!-- Botón para el resto de la configuración -->
+                        <button id="btn-settings" class="text-gray-400 hover:text-white transition duration-200 p-1">
+                            <i data-lucide="settings" class="w-6 h-6"></i>
+                        </button>
+                    </div>
+                </header>
+                
+                <main class="flex-grow p-4 space-y-6 max-w-lg mx-auto w-full">
+                    
+                    <!-- Balance Neto VEF y Conversión USD -->
+                    <div class="bg-gray-800 p-6 rounded-xl shadow-lg border-t-4 border-green-500 space-y-2">
+                        
+                        <p class="text-sm text-gray-400 font-semibold mb-1">Balance Neto (VEF - Bolívar)</p>
+                        <h2 class="text-4xl font-extrabold ${balanceColor}">${formatCurrency(netBalance, 'VEF')}</h2>
+                        
+                        <!-- Equivalente en USD -->
+                        <div class="pt-2 border-t border-gray-700">
+                            <p class="text-sm text-gray-400 font-semibold">Equivalente en Dólares (USD)</p>
+                            <span class="text-2xl font-bold ${usdColor}">${formatCurrency(balanceInUSD, 'USD')}</span>
+                        </div>
+                    </div>
+
+                    <!-- Resumen rápido -->
+                    <div class="grid grid-cols-2 gap-4">
+                        <div class="bg-gray-800 p-4 rounded-xl shadow-lg flex flex-col">
+                            <i data-lucide="trending-up" class="w-6 h-6 text-green-400 mb-2"></i>
+                            <p class="text-sm text-gray-400">Ingresos Totales (Bs.)</p>
+                            <span class="text-xl font-bold ${incomeColor}">${formatCurrency(totalIncome, 'VEF')}</span>
+                        </div>
+                        <div class="bg-gray-800 p-4 rounded-xl shadow-lg flex flex-col">
+                            <i data-lucide="trending-down" class="w-6 h-6 text-red-400 mb-2"></i>
+                            <p class="text-sm text-gray-400">Egresos Totales (Bs.)</p>
+                            <span class="text-xl font-bold ${expenseColor}">${formatCurrency(totalExpense, 'VEF')}</span>
+                        </div>
+                    </div>
+
+                    <!-- Detalle de Impuestos y Subtotal -->
+                    <div class="bg-gray-800 p-4 rounded-xl shadow-lg space-y-2 text-sm">
+                        <div class="flex justify-between border-b border-gray-700 pb-2">
+                            <span class="text-gray-400">Subtotal (Ingresos - Egresos):</span>
+                            <span class="font-semibold">${formatCurrency(subtotal, 'VEF')}</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-gray-400">Impuestos (${config.taxRate}%):</span>
+                            <span class="text-red-400 font-semibold">- ${formatCurrency(taxAmount, 'VEF')}</span>
+                        </div>
+                    </div>
+                    
+                    <!-- Últimas Transacciones -->
+                    <h3 class="text-xl font-semibold border-b border-gray-700 pb-2 pt-2">Últimas Transacciones</h3>
+                    <div class="space-y-3">
+                        ${transactions.length === 0 
+                            ? `<p class="text-center text-gray-500 p-4">Añade tu primer ingreso o egreso.</p>`
+                            : transactions.slice().sort((a, b) => b.id - a.id).slice(0, 5).map(t => `
+                                <div class="flex justify-between items-center bg-gray-800 p-3 rounded-lg shadow-md hover:bg-gray-700 transition">
+                                    <div class="flex items-center space-x-3">
+                                        <i data-lucide="${t.type === 'income' ? 'trending-up' : 'trending-down'}" class="w-5 h-5 ${t.type === 'income' ? 'text-green-500' : 'text-red-500'}"></i>
+                                        <div>
+                                            <p class="font-semibold">${t.description || t.category}</p>
+                                            <p class="text-xs text-gray-400">${t.category} - ${new Date(t.date).toLocaleDateString()}</p>
+                                        </div>
+                                    </div>
+                                    <span class="font-bold ${t.type === 'income' ? 'text-green-400' : 'text-red-400'}">
+                                        ${formatCurrency(t.amount * (t.type === 'expense' ? -1 : 1), 'VEF')}
+                                    </span>
+                                </div>
+                            `).join('')
+                        }
+                    </div>
+
+                    <button id="btn-view-all" class="w-full text-center text-green-400 hover:text-green-300 font-semibold p-2 transition">Ver todas las transacciones</button>
+                </main>
+
+                ${renderNavBar()}
+            `;
+        };
+        
+        const renderTransactionsList = () => {
+            const sortedTransactions = transactions.slice().sort((a, b) => b.id - a.id);
+            
+            return `
+                <header class="sticky top-0 bg-gray-900 shadow-md p-4 flex justify-between items-center z-10">
+                    <button id="btn-back-dashboard" class="text-gray-400 hover:text-white transition duration-200">
+                        <i data-lucide="bar-chart-2" class="w-6 h-6"></i>
+                    </button>
+                    <h1 class="text-xl font-bold text-white">Todas las Transacciones</h1>
+                    <!-- Botón de Reiniciar Historial -->
+                    <button id="btn-reset-data" class="flex items-center text-red-400 hover:text-red-300 transition duration-200 text-sm font-semibold">
+                        <i data-lucide="refresh-cw" class="w-4 h-4 mr-1"></i> Reiniciar
+                    </button>
+                </header>
+                
+                <main class="flex-grow p-4 max-w-lg mx-auto w-full">
+                    <div class="space-y-3">
+                        ${sortedTransactions.length === 0 
+                            ? `<p class="text-center text-gray-500 p-8">No hay transacciones registradas.</p>`
+                            : sortedTransactions.map(t => `
+                                <div class="flex justify-between items-center bg-gray-800 p-3 rounded-xl shadow-md border-l-4 ${t.type === 'income' ? 'border-green-500' : 'border-red-500'}">
+                                    <div class="flex-grow space-y-1">
+                                        <p class="font-semibold">${t.description || t.category}</p>
+                                        <p class="text-xs text-gray-400">
+                                            ${t.category} | ${new Date(t.date).toLocaleDateString()}
+                                        </p>
+                                    </div>
+                                    <div class="flex items-center space-x-3">
+                                        <span class="font-bold text-right ${t.type === 'income' ? 'text-green-400' : 'text-red-400'} w-24">
+                                            ${formatCurrency(t.amount * (t.type === 'expense' ? -1 : 1), 'VEF')}
+                                        </span>
+                                        <button data-id="${t.id}" class="btn-delete-transaction text-gray-500 hover:text-red-500 transition">
+                                            <i data-lucide="trash-2" class="w-5 h-5"></i>
+                                        </button>
+                                    </div>
+                                </div>
+                            `).join('')
+                        }
+                    </div>
+                </main>
+
+                ${renderNavBar()}
+            `;
+        };
+
+
+        // --- 8. ELEMENTOS DE UI REUTILIZABLES ---
+        
+        const renderNavBar = () => {
+            // Un componente simple de barra de navegación inferior
+            return `
+                <nav class="fixed bottom-0 left-0 right-0 bg-gray-800 shadow-2xl p-3 z-20">
+                    <div class="flex justify-around items-center max-w-lg mx-auto">
+                        <button id="btn-view-dashboard" class="flex flex-col items-center text-gray-400 hover:text-white transition duration-200 ${currentView === 'dashboard' ? 'text-green-400' : ''}">
+                            <i data-lucide="bar-chart-2" class="w-6 h-6"></i>
+                            <span class="text-xs mt-1">Dashboard</span>
+                        </button>
+                        
+                        <!-- Botón flotante central grande para añadir -->
+                        <div class="relative -top-4">
+                            <button id="btn-add-transaction" class="bg-green-500 hover:bg-green-600 text-white p-4 rounded-full shadow-lg transition duration-200 transform hover:scale-105 focus:outline-none focus:ring-4 focus:ring-green-500 focus:ring-opacity-50">
+                                <i data-lucide="plus" class="w-8 h-8"></i>
+                            </button>
+                        </div>
+
+                        <button id="btn-view-list" class="flex flex-col items-center text-gray-400 hover:text-white transition duration-200 ${currentView === 'list' ? 'text-green-400' : ''}">
+                            <i data-lucide="list" class="w-6 h-6"></i>
+                            <span class="text-xs mt-1">Lista</span>
+                        </button>
+                    </div>
+                </nav>
+            `;
+        };
+        
+        const renderModal = (title, bodyHtml, onConfirm, confirmText = 'Guardar', showCancel = true) => {
+            // Crea y muestra un modal dinámico
+            const overlay = document.createElement('div');
+            overlay.id = 'simple-modal-overlay';
+            overlay.className = 'fixed inset-0 bg-black bg-opacity-70 z-30 flex items-center justify-center p-4';
+            
+            overlay.innerHTML = `
+                <div class="bg-gray-800 rounded-xl shadow-2xl max-w-sm w-full p-6 transform transition-all scale-100 opacity-100">
+                    <div class="flex justify-between items-center mb-4 border-b border-gray-700 pb-3">
+                        <h3 class="text-xl font-bold text-white">${title}</h3>
+                        <button class="btn-close-modal text-gray-400 hover:text-white">
+                            <i data-lucide="x" class="w-5 h-5"></i>
+                        </button>
+                    </div>
+                    <div class="modal-body space-y-4">
+                        ${bodyHtml}
+                    </div>
+                    <div class="flex justify-end space-x-3 mt-6">
+                        ${showCancel ? `<button class="btn-close-modal bg-gray-700 text-white px-4 py-2 rounded-lg hover:bg-gray-600 transition">Cancelar</button>` : ''}
+                        <button id="btn-modal-confirm" class="bg-green-500 text-white px-4 py-2 rounded-lg hover:bg-green-600 transition disabled:bg-gray-600">${confirmText}</button>
+                    </div>
+                </div>
+            `;
+            
+            document.body.appendChild(overlay);
+
+            // Cierra el modal al hacer click en el botón de cerrar o cancelar, o fuera del contenido
+            const closeModal = () => {
+                // Pequeña animación de salida
+                const modalContent = overlay.querySelector('div');
+                modalContent.classList.replace('scale-100', 'scale-95');
+                modalContent.classList.replace('opacity-100', 'opacity-0');
+                setTimeout(() => overlay.remove(), 300);
+            };
+
+            overlay.querySelectorAll('.btn-close-modal').forEach(btn => btn.onclick = closeModal);
+            overlay.onclick = (e) => {
+                if (e.target === overlay) {
+                    closeModal();
+                }
+            };
+            
+            // Asigna la función de confirmación
+            const confirmButton = document.getElementById('btn-modal-confirm');
+            if (confirmButton) {
+                confirmButton.onclick = () => {
+                    if (onConfirm()) { // onConfirm devuelve true si la acción fue exitosa y se puede cerrar
+                        closeModal();
+                    }
+                };
+            }
+            
+            // Renderiza los iconos de Lucide dentro del modal
+            if (window.lucide && window.lucide.createIcons) {
+                window.lucide.createIcons({
+                    icons: window.lucide,
+                    attrs: { 'stroke-width': 2 },
+                    nameAttr: 'data-lucide'
+                });
+            }
+        };
+
+
+        // --- 9. MODALES ESPECÍFICOS DE FUNCIONALIDAD ---
+
+        const showAddTransactionModal = (type) => {
+            const isIncome = type === 'income';
+            const categories = isIncome ? config.incomeCategories : config.expenseCategories;
+            const typeLabel = isIncome ? 'Ingreso' : 'Egreso';
+            const accentColor = isIncome ? 'text-green-500' : 'text-red-500';
+            const buttonColor = isIncome ? 'bg-green-500 hover:bg-green-600' : 'bg-red-500 hover:bg-red-600';
+
+            const modalBody = `
+                <p class="${accentColor} font-bold text-center mb-4">Añadir Nuevo ${typeLabel}</p>
+                <div class="space-y-3">
+                    <label class="block">
+                        <span class="text-gray-400">Monto (${config.currency} - Bs.):</span>
+                        <input type="number" id="modal-amount" placeholder="0.00" class="w-full mt-1 p-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:ring-1 focus:ring-green-500 focus:border-green-500" min="0.01" step="0.01" required>
+                    </label>
+                    <label class="block">
+                        <span class="text-gray-400">Categoría:</span>
+                        <select id="modal-category" class="w-full mt-1 p-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:ring-1 focus:ring-green-500 focus:border-green-500">
+                            ${categories.map(cat => `<option value="${cat}">${cat}</option>`).join('')}
+                        </select>
+                    </label>
+                    <label class="block">
+                        <span class="text-gray-400">Descripción (Opcional):</span>
+                        <input type="text" id="modal-description" placeholder="Ej: Compra de supermercado" class="w-full mt-1 p-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:ring-1 focus:ring-green-500 focus:border-green-500">
+                    </label>
+                </div>
+            `;
+
+            const onConfirm = () => {
+                const amount = document.getElementById('modal-amount').value;
+                const category = document.getElementById('modal-category').value;
+                const description = document.getElementById('modal-description').value;
+                
+                if (amount && category) {
+                    if (addTransaction(type, amount, category, description)) {
+                        // Muestra un mensaje de éxito
+                        showNotification(`${typeLabel} añadido con éxito.`);
+                        return true;
+                    } else {
+                        showNotification('Por favor, introduce un monto válido.', 'error');
+                        return false;
+                    }
+                } else {
+                    showNotification('El monto y la categoría son obligatorios.', 'error');
+                    return false;
+                }
+            };
+
+            renderModal(`Añadir ${typeLabel}`, modalBody, onConfirm, `Añadir ${typeLabel}`, true);
+            
+            // Cambiar color del botón de confirmación
+            const confirmButton = document.getElementById('btn-modal-confirm');
+            if (confirmButton) {
+                confirmButton.classList.remove('bg-green-500', 'hover:bg-green-600');
+                confirmButton.classList.add(buttonColor);
+            }
+        };
+        
+        // --- Modal: Edición Rápida de Tasa ---
+        const showRateEditModal = () => {
+            const dollarRateInput = `<input type="number" id="setting-dollar-rate" value="${config.dailyDollarRate}" class="w-full p-3 text-2xl text-center bg-gray-700 border border-yellow-500 rounded-xl text-white font-extrabold focus:ring-2 focus:ring-yellow-400 focus:border-yellow-400" min="0.01" step="0.01">`;
+            
+            const modalBody = `
+                <div class="space-y-4 text-center">
+                    <p class="text-lg font-semibold text-white">Actualizar Tasa del Dólar</p>
+                    <p class="text-sm text-gray-400">Introduce el valor actual de 1 Dólar en Bolívares (Bs.):</p>
+                    
+                    <label class="block">
+                        <span class="text-yellow-400 font-extrabold text-3xl">1 $ = </span>
+                        ${dollarRateInput}
+                    </label>
+                    
+                    <p class="text-xs text-gray-500">El dashboard se actualizará automáticamente con el nuevo valor.</p>
+                </div>
+            `;
+
+            const onConfirm = () => {
+                const newDollarRate = parseFloat(document.getElementById('setting-dollar-rate').value);
+
+                if (isNaN(newDollarRate) || newDollarRate <= 0) {
+                    showNotification('Tasa del dólar inválida (debe ser mayor a 0).', 'error');
+                    return false;
+                }
+                
+                config.dailyDollarRate = newDollarRate;
+                saveConfig();
+                renderApp();
+                showNotification('Tasa del Dólar actualizada con éxito.', 'success');
+                return true;
+            };
+
+            renderModal('Tasa de Cambio Rápida', modalBody, onConfirm, 'Guardar Tasa');
+            
+            // Asegurarse de que el botón de confirmación sea amarillo
+            const confirmButton = document.getElementById('btn-modal-confirm');
+            if (confirmButton) {
+                confirmButton.classList.remove('bg-green-500', 'hover:bg-green-600');
+                confirmButton.classList.add('bg-yellow-500', 'hover:bg-yellow-600');
+            }
+        };
+
+        // --- Modal de Configuración Completa (sin tasa del dólar) ---
+        const showSettingsModal = () => {
+            const taxRateInput = `<input type="number" id="setting-tax" value="${config.taxRate}" class="w-full p-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:ring-1 focus:ring-green-500 focus:border-green-500" min="0" max="100" step="0.1">`;
+            
+            
+            const categoryList = (type) => {
+                const categories = type === 'income' ? config.incomeCategories : config.expenseCategories;
+                const listId = `setting-categories-${type}`;
+                const typeLabel = type === 'income' ? 'Ingresos' : 'Egresos';
+                
+                return `
+                    <div class="bg-gray-700 p-3 rounded-lg">
+                        <h4 class="font-semibold text-green-400 mb-2">Categorías de ${typeLabel}</h4>
+                        <ul id="${listId}" class="space-y-1">
+                            ${categories.map(cat => `
+                                <li class="flex justify-between items-center text-sm text-gray-300 bg-gray-600 p-1 px-2 rounded">
+                                    <span>${cat}</span>
+                                    <button data-cat="${cat}" data-type="${type}" class="btn-delete-category text-red-400 hover:text-red-300 transition leading-none">
+                                        <i data-lucide="trash-2" class="w-4 h-4"></i>
+                                    </button>
+                                </li>
+                            `).join('')}
+                        </ul>
+                        <div class="flex mt-3 space-x-2">
+                            <input type="text" id="input-new-category-${type}" placeholder="Nueva categoría" class="flex-grow p-1 text-sm bg-gray-800 border border-gray-600 rounded-lg text-white focus:ring-1 focus:ring-green-500">
+                            <button data-type="${type}" class="btn-add-category bg-green-500 text-white text-sm px-3 rounded-lg hover:bg-green-600 transition">Añadir</button>
+                        </div>
+                    </div>
+                `;
+            };
+
+            const modalBody = `
+                <div class="space-y-4">
+                    <h3 class="text-lg font-bold text-green-400 border-b border-gray-700 pb-2">Configuración de Impuestos</h3>
+                    
+                    <label class="block">
+                        <span class="text-gray-400 font-semibold">Tasa de Impuesto (%) sobre Ingresos:</span>
+                        ${taxRateInput}
+                        <p class="text-xs text-gray-500 mt-1">La tasa del dólar se edita directamente en el Dashboard.</p>
+                    </label>
+
+                    <h3 class="text-lg font-bold text-green-400 border-b border-gray-700 pb-2 pt-4">Personalización de Categorías</h3>
+                    
+                    ${categoryList('income')}
+                    ${categoryList('expense')}
+                </div>
+            `;
+
+            const onConfirm = () => {
+                const newTaxRate = parseFloat(document.getElementById('setting-tax').value);
+
+                if (isNaN(newTaxRate) || newTaxRate < 0 || newTaxRate > 100) {
+                    showNotification('Tasa de impuesto inválida (debe ser entre 0 y 100).', 'error');
+                    return false;
+                }
+                
+                config.taxRate = newTaxRate;
+                saveConfig();
+                renderApp();
+                showNotification('Configuración guardada con éxito.');
+                return true;
+            };
+
+            renderModal('Ajustes y Categorías', modalBody, onConfirm, 'Guardar Cambios');
+            
+            // Una vez que el modal está en el DOM, adjuntamos los manejadores de categorías
+            setTimeout(() => {
+                document.querySelectorAll('.btn-add-category').forEach(btn => {
+                    btn.onclick = (e) => {
+                        const type = e.currentTarget.dataset.type;
+                        const input = document.getElementById(`input-new-category-${type}`);
+                        const newCat = input.value.trim();
+                        if (newCat && !config[`${type}Categories`].includes(newCat)) {
+                            config[`${type}Categories`].push(newCat);
+                            saveConfig();
+                            // Re-renderizar solo el modal para actualizar las listas
+                            showSettingsModal(); 
+                            showNotification(`Categoría de ${type === 'income' ? 'ingreso' : 'egreso'} añadida.`);
+                        }
+                        input.value = '';
+                    };
+                });
+                
+                document.querySelectorAll('.btn-delete-category').forEach(btn => {
+                    btn.onclick = (e) => {
+                        const type = e.currentTarget.dataset.type;
+                        const cat = e.currentTarget.dataset.cat;
+                        config[`${type}Categories`] = config[`${type}Categories`].filter(c => c !== cat);
+                        saveConfig();
+                        // Re-renderizar solo el modal
+                        showSettingsModal();
+                        showNotification(`Categoría de ${type === 'income' ? 'ingreso' : 'egreso'} eliminada.`);
+                    };
+                });
+            }, 0);
+        };
+        
+        const showTransactionTypeModal = () => {
+            const modalBody = `
+                <p class="text-center text-gray-300">¿Qué tipo de transacción quieres añadir?</p>
+                <div class="flex justify-center space-x-4 pt-4">
+                    <button id="btn-add-income" class="flex flex-col items-center bg-green-700 hover:bg-green-600 text-white p-4 rounded-xl transition w-1/2">
+                        <i data-lucide="trending-up" class="w-8 h-8 mb-2"></i>
+                        <span class="font-bold">Ingreso</span>
+                    </button>
+                    <button id="btn-add-expense" class="flex flex-col items-center bg-red-700 hover:bg-red-600 text-white p-4 rounded-xl transition w-1/2">
+                        <i data-lucide="trending-down" class="w-8 h-8 mb-2"></i>
+                        <span class="font-bold">Egreso</span>
+                    </button>
+                </div>
+            `;
+            
+            // onConfirm es null porque no hay formulario, solo botones de navegación
+            renderModal('Añadir Transacción', modalBody, () => true, 'Cerrar', false);
+            
+            // Adjuntar event listeners
+            setTimeout(() => {
+                // Cerrar el modal actual y abrir el de añadir ingreso
+                document.getElementById('btn-add-income').onclick = () => {
+                    document.getElementById('simple-modal-overlay')?.remove();
+                    showAddTransactionModal('income');
+                };
+                
+                // Cerrar el modal actual y abrir el de añadir egreso
+                document.getElementById('btn-add-expense').onclick = () => {
+                    document.getElementById('simple-modal-overlay')?.remove();
+                    showAddTransactionModal('expense');
+                };
+            }, 0);
+            
+            // Ocultar el botón de "Guardar" y usar el de "Cerrar"
+            document.getElementById('btn-modal-confirm').style.display = 'none';
+        };
+
+        const showResetConfirmationModal = () => {
+            const modalBody = `
+                <p class="text-white text-center">¡CUIDADO! Esta acción eliminará permanentemente **TODAS** tus transacciones y configuraciones guardadas (tasa, categorías) y restablecerá la aplicación a sus valores iniciales.</p>
+                <p class="text-red-400 text-center font-bold mt-2">¿Estás absolutamente seguro de querer continuar?</p>
+            `;
+            
+            const onConfirm = () => {
+                resetApp();
+                showNotification('¡Datos de la aplicación reiniciados!', 'success');
+                return true;
+            };
+
+            renderModal('Reiniciar Aplicación y Borrar Historial', modalBody, onConfirm, 'Sí, Reiniciar Todo', true);
+            
+            // Asegurarse de que el botón de confirmación sea rojo para mayor alerta
+            const confirmButton = document.getElementById('btn-modal-confirm');
+            if (confirmButton) {
+                confirmButton.classList.remove('bg-green-500', 'hover:bg-green-600');
+                confirmButton.classList.add('bg-red-600', 'hover:bg-red-700');
+            }
+        };
+
+        const showNotification = (message, type = 'success', duration = 3000) => {
+            const container = document.getElementById('notification-container') || (() => {
+                const div = document.createElement('div');
+                div.id = 'notification-container';
+                div.className = 'fixed top-4 right-4 z-50 space-y-2 max-w-xs';
+                document.body.appendChild(div);
+                return div;
+            })();
+
+            const notification = document.createElement('div');
+            const color = type === 'success' ? 'bg-green-500' : 'bg-red-500';
+            const icon = type === 'success' ? 'check' : 'x'; // Lucide icons
+
+            notification.className = `${color} text-white p-4 rounded-xl shadow-xl transform translate-x-full transition-all duration-300 ease-out`;
+            notification.innerHTML = `
+                <div class="flex items-center space-x-2">
+                    <i data-lucide="${icon}" class="w-5 h-5"></i>
+                    <p class="font-semibold text-sm">${message}</p>
+                </div>
+            `;
+            
+            container.appendChild(notification);
+            
+            // Mostrar
+            setTimeout(() => {
+                notification.classList.remove('translate-x-full');
+            }, 10);
+
+            // Ocultar y remover
+            setTimeout(() => {
+                notification.classList.add('translate-x-full');
+                notification.addEventListener('transitionend', () => notification.remove());
+            }, duration);
+            
+            // Renderiza los iconos de Lucide
+            if (window.lucide && window.lucide.createIcons) {
+                window.lucide.createIcons({
+                    icons: window.lucide,
+                    attrs: { 'stroke-width': 2 },
+                    nameAttr: 'data-lucide'
+                });
+            }
+        };
+
+        // --- 10. RENDERIZADO GLOBAL y ENLACE DE EVENTOS ---
+        
+        const renderApp = () => {
+            const container = document.getElementById('app-container');
+            if (!container) return;
+
+            // Remueve modal previo si existe antes de renderizar (Limpia DOM)
+            document.getElementById('simple-modal-overlay')?.remove();
+
+            // Si la app no está lista (por un error), mostramos un error.
+            if (!isAppReady) {
+                // Si falla la carga, mostramos un error simple y claro
+                container.classList.add('items-center', 'justify-center');
+                container.innerHTML = `<div class="p-4 text-center text-red-400">Error al cargar la aplicación. Revisa la consola o reinicia los datos.</div>`;
+                return;
+            }
+            
+            // La app ha cargado. Limpiamos las clases de centrado de la carga
+            container.classList.remove('items-center', 'justify-center');
+            let contentHTML = '';
+
+            // 1. Elegir contenido según la vista
+            switch (currentView) {
+                case 'dashboard':
+                    contentHTML = renderDashboard();
+                    break;
+                case 'list':
+                    contentHTML = renderTransactionsList();
+                    break;
+                default:
+                    contentHTML = renderDashboard(); // Fallback
+                    break;
+            }
+
+            // 2. Insertar el contenido
+            container.innerHTML = contentHTML;
+
+            // 3. Re-asignación de Event Listeners y renderizado de iconos (CRÍTICO)
+            // Usamos setTimeout para asegurar que el DOM ha procesado el innerHTML
+            setTimeout(() => {
+                // Renderizar todos los iconos de Lucide
+                if (window.lucide && window.lucide.createIcons) {
+                    window.lucide.createIcons({
+                        icons: window.lucide,
+                        attrs: { 'stroke-width': 2 },
+                        nameAttr: 'data-lucide'
+                    });
+                }
+
+                // Enlaces de la barra de navegación y botones principales
+                document.getElementById('btn-view-dashboard')?.addEventListener('click', () => {
+                    currentView = 'dashboard';
+                    renderApp();
+                });
+                
+                document.getElementById('btn-view-list')?.addEventListener('click', () => {
+                    currentView = 'list';
+                    renderApp();
+                });
+                
+                document.getElementById('btn-add-transaction')?.addEventListener('click', showTransactionTypeModal);
+                
+                // MANEJADORES DE LA CABECERA
+                document.getElementById('btn-settings')?.addEventListener('click', showSettingsModal);
+                // Edición rápida de la tasa del dólar
+                document.getElementById('btn-edit-rate')?.addEventListener('click', showRateEditModal);
+                
+                // Enlaces de regreso (desde lista)
+                document.getElementById('btn-back-dashboard')?.addEventListener('click', () => {
+                    currentView = 'dashboard';
+                    renderApp();
+                });
+                
+                // Enlace 'Ver todas'
+                document.getElementById('btn-view-all')?.addEventListener('click', () => {
+                    currentView = 'list';
+                    renderApp();
+                });
+
+                // Enlace de Reinicio (en la vista de lista)
+                document.getElementById('btn-reset-data')?.addEventListener('click', showResetConfirmationModal);
+
+                // Manejo de eliminación de transacción (en la vista de lista)
+                document.querySelectorAll('.btn-delete-transaction').forEach(btn => {
+                    btn.addEventListener('click', (e) => {
+                        const transactionId = parseInt(e.currentTarget.dataset.id);
+                        deleteTransaction(transactionId);
+                        showNotification('Transacción eliminada.');
+                    });
+                });
+
+            }, 0); // El '0' ejecuta esto tan pronto como el hilo principal esté libre.
+        };
+
+        // --- 11. INICIALIZACIÓN ---
+        const initializeApp = () => {
+            try {
+                loadConfig();
+                loadTransactions();
+                isAppReady = true;
+            } catch (e) {
+                console.error("Error fatal durante la inicialización:", e);
+                isAppReady = false; // Marcamos que falló
+            }
+            // Renderizamos en cualquier caso (mostrará la app o el error si isAppReady es false)
+            renderApp();
+        };
+
+        // --- ARRANQUE DE LA APP ---
+        // Al ser un script de tipo "module", se ejecuta 'defer' por defecto.
+        // Esto significa que el DOM ya estará listo cuando llegue a esta línea.
+        initializeApp();
+
+    </script>
+</body>
+</html>
